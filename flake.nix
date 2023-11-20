@@ -17,7 +17,7 @@
           devShells.default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
               (python39.withPackages (ps: with ps; [ lark berkeleydb ]))
-              #python39Packages.mypy
+              python39Packages.mypy
             ];
           };
         }

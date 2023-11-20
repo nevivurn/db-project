@@ -324,6 +324,9 @@ class DB:
         schema_db.open(filename, dbname='SCHEMA', dbtype=bdb.DB_HASH, flags=bdb.DB_CREATE)
         self.schema_db = schema_db
 
+    def close(self) -> None:
+        self.schema_db.close()
+
     def _get_table(self, tname: str) -> Table:
         table_raw = self.schema_db.get(f"ZZ_table_{tname}".encode())
         if table_raw is None:

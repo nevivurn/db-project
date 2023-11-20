@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import date
 from typing import Any, Union, no_type_check
 import sys
@@ -8,10 +9,9 @@ from lark.exceptions import VisitError
 from db_messages import *
 import db
 
-Node = Union[Token, Tree]
-
 PROMPT = 'DB_2017-19937>'
 
+# Utility functions for priting
 def println_prompt(msg: Any) -> None:
     print(PROMPT, msg)
 def print_prompt() -> None:
@@ -22,12 +22,13 @@ class PrintTransformer(Transformer[Any, Any]):
         super().__init__()
         self.db = db
 
+    # handle CREATE TABLE
     def create_table_query(self, args: Any) -> None:
         tname = args[2].children[0].lower()
 
-        cols = []
-
+        # parse columns
         column_defs = args[3].find_data('column_definition')
+        cols = []
         for column_def in column_defs:
             cname = column_def.children[0].children[0].lower()
 
@@ -48,6 +49,7 @@ class PrintTransformer(Transformer[Any, Any]):
             ctype.nullable = column_def.children[2] is None
             cols.append(db.Column(cname, ctype))
 
+        # parse pkeys
         pkey_defs = args[3].find_data('primary_key_constraint')
         pkeys = set()
         for pkey_def in pkey_defs:
@@ -55,6 +57,7 @@ class PrintTransformer(Transformer[Any, Any]):
             for column_name in column_names:
                 pkeys.add(column_name.children[0].lower())
 
+        # parse fkeys
         fkey_defs = args[3].find_data('referential_constraint')
         fkeys = []
         for fkey_def in fkey_defs:
@@ -75,6 +78,7 @@ class PrintTransformer(Transformer[Any, Any]):
 
         println_prompt(self.db.create_table(table))
 
+    # not implemented
     def drop_table_query(self, args: Any) -> None:
         println_prompt("'DROP TABLE' requested")
     def explain_query(self, args: Any) -> None:
@@ -86,27 +90,23 @@ class PrintTransformer(Transformer[Any, Any]):
     def show_tables_query(self, args: Any) -> None:
         println_prompt("'SHOW TABLES' requested")
 
-    # pre-handle WHEREs
+    # convert WHERE clauses in the parser
     def boolean_expr(self, args: list[db.Where]) -> db.Where:
         return db.WhereOr(*args[::2])
-
     def boolean_term(self, args: list[db.Where]) -> db.Where:
         return db.WhereAnd(*args[::2])
-
     def boolean_factor(self, args: tuple[Any, db.Where]) -> db.Where:
         if args[0] is not None:
             return db.WhereNot(args[1])
         return args[1]
-
     def boolean_test(self, args: tuple[db.Where]) -> db.Where:
         return args[0]
-
     def parenthesized_boolean_expr(self, args: tuple[Any, db.Where]) -> db.Where:
         return args[1]
-
     def predicate(self, args: tuple[db.Where]) -> db.Where:
         return args[0]
 
+    # comparison, like A < B
     @no_type_check
     def comparison_predicate(self, args) -> db.Where:
         oper = args[1].children[0].value
@@ -126,6 +126,7 @@ class PrintTransformer(Transformer[Any, Any]):
             raise SyntaxError
         return db.WhereComp(args[0], args[2], oper)
 
+    # [NOT] NULL check
     @no_type_check
     def null_predicate(self, args) -> db.Where:
         tname = args[0]
@@ -138,6 +139,7 @@ class PrintTransformer(Transformer[Any, Any]):
             where = db.WhereNot(where)
         return where
 
+    # literals, used in both INSERT VALUES and WHERE
     def comparable_value(self, args: list[Token]) -> db.Attr:
         if args[0].type == 'INT':
             return int(args[0])
@@ -148,6 +150,7 @@ class PrintTransformer(Transformer[Any, Any]):
         else:
             raise SyntaxError
 
+    # comparison operands
     @no_type_check
     def comp_operand(self, args) -> db.Operand:
         # literal
@@ -162,9 +165,10 @@ class PrintTransformer(Transformer[Any, Any]):
 
         return db.Ident(tname, cname)
 
+    # handle SELECT
     @no_type_check
     def select_query(self, args):
-
+        # parse cview, the projection part
         if len(args[1].children) == 0:
             cview = None
         else:
@@ -186,10 +190,12 @@ class PrintTransformer(Transformer[Any, Any]):
                 cview.idents.append(db.Ident(tname, cname))
                 cview.alt_cnames.append(alt_cname)
 
+            # cannot have duplicate target columns
             for cname in cview.alt_cnames:
                 if cview.alt_cnames.count(cname) > 1:
                     raise SelectColumnResolveError(cname)
 
+        # parse FROMs
         table_defs = args[2].find_data('referred_table')
         tview = db.TableView([], [])
         for table_def in table_defs:
@@ -203,11 +209,13 @@ class PrintTransformer(Transformer[Any, Any]):
             tview.tnames.append(tname)
             tview.alt_tnames.append(alt_tname)
 
+        # all tables in SELECT must be in FROM
         if cview is not None:
             c_tnames = set(ident.tname for ident in cview.idents if ident.tname is not None)
             if diff := c_tnames - set(tview.alt_tnames):
                 raise SelectTableExistenceError(diff.pop())
 
+        # WHERE has already been parsed
         where_def = args[2].children[1]
         if where_def is None:
             where = None
@@ -216,8 +224,10 @@ class PrintTransformer(Transformer[Any, Any]):
 
         print(self.db.select_values(cview, tview, where))
 
+    # handle INSERT
     @no_type_check
     def insert_query(self, args):
+        # parse columns
         tname = args[2].children[0].lower()
         if args[3] is not None:
             cnames = []
@@ -228,13 +238,16 @@ class PrintTransformer(Transformer[Any, Any]):
         else:
             cnames = None
 
+        # all vals are literals, already handled above
         vals = args[4].children[2:-1]
 
+        # if columns are specified, length must match
         if cnames is not None and len(cnames) != len(vals):
             raise InsertTypeMismatchError
 
         println_prompt(self.db.insert_values(tname, db.Record(vals, cnames)))
 
+    # handle DELETE
     @no_type_check
     def delete_query(self, args):
         tname = args[2].children[0].lower()
@@ -244,6 +257,7 @@ class PrintTransformer(Transformer[Any, Any]):
             where = args[3].children[1]
         println_prompt(self.db.delete_values(tname, where))
 
+    # not implemented
     def update_query(self, args: Any) -> None:
         println_prompt("'UPDATE' requested")
 
@@ -255,27 +269,28 @@ def run() -> None:
     with open('grammar.lark', 'r') as f:
         sql_parser = Lark(f.read(), start='command', lexer='basic')
 
-    while True:
-        query = ''
-        print_prompt()
-        while not (query and query[-1] == ';'):
-            query += input()
+    with closing(db.DB('myDB.db')) as ndb:
+        trans = PrintTransformer(ndb)
+        while True:
+            query = ''
+            print_prompt()
+            while not (query and query[-1] == ';'):
+                query += input()
 
-        for q in query.split(';')[:-1]:
-            try:
-                output = sql_parser.parse(q + ';')
-            except UnexpectedInput:
-                println_prompt('Syntax error')
-                break
+            for q in query.split(';')[:-1]:
+                try:
+                    output = sql_parser.parse(q + ';')
+                except UnexpectedInput:
+                    println_prompt('Syntax error')
+                    break
 
-            ndb = db.DB('_test.db')
-            try:
-                PrintTransformer(ndb).transform(output)
-            except VisitError as e:
-                if isinstance(e.orig_exc, DBError):
-                    println_prompt(e.orig_exc)
-                else:
-                    raise
+                try:
+                    trans.transform(output)
+                except VisitError as e:
+                    if isinstance(e.orig_exc, DBError):
+                        println_prompt(e.orig_exc)
+                    else:
+                        raise
 
 if __name__ == '__main__':
     run()
