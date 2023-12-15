@@ -18,15 +18,8 @@
           src = ./.;
           format = "other";
 
-          nativeBuildInputs = with pkgs.python3Packages; [
-            mypy
-          ];
-
-          propagatedBuildInputs = with pkgs.python3Packages; [
-            mysql-connector
-            numpy
-            pandas
-          ];
+          nativeBuildInputs = [ pkgs.python3Packages.mypy ];
+          propagatedBuildInputs = [ pkgs.python3Packages.mysql-connector ];
 
           installPhase = ''
             runHook preInstall
